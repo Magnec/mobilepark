@@ -1,0 +1,15 @@
+mobilpark_sms_gateway.verify_otp_form:
+  path: "/verify-otp"
+  defaults:
+    _form: '\Drupal\mobilpark_sms_gateway\Form\VerifyOTPForm'
+    _title: "Doğrulama Sayfası"
+  requirements:
+    _permission: "access content"
+
+mobilpark_sms_gateway.admin_phone_verification_form:
+  path: "/admin/config/mobilpark/phone-verification"
+  defaults:
+    _form: '\Drupal\mobilpark_sms_gateway\Form\AdminPhoneVerificationForm'
+    _title: "Kullanıcı Telefon Numarası Yönetimi"
+  requirements:
+    _permission: "administer users"

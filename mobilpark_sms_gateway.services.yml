@@ -1,0 +1,9 @@
+services:
+  mobilpark_sms_gateway.user_status_check_subscriber:
+    class: Drupal\mobilpark_sms_gateway\EventSubscriber\UserStatusCheckSubscriber
+    arguments:
+      - '@current_route_match'
+      - '@request_stack'
+      - '@current_user'
+    tags:
+      - { name: 'event_subscriber' }

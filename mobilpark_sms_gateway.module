@@ -1,0 +1,322 @@
+<?php
+
+function mobilpark_sms_gateway_send_sms($recipient_number, $message_text) {
+  if (empty($recipient_number)) {
+    \Drupal::messenger()->addWarning('Telefon numarası bulunamadı.');
+    return false;
+  }
+
+  // TranslatableMarkup objesini string'e dönüştür
+  if ($message_text instanceof \Drupal\Core\StringTranslation\TranslatableMarkup) {
+    $message_text = $message_text->render();
+  }
+
+  $sms = (new \Drupal\sms\Message\SmsMessage())
+    ->addRecipient($recipient_number)
+    ->setMessage($message_text);
+
+  try {
+    $sms_service = \Drupal::service('sms.provider');
+    $sms_service->send($sms);
+    \Drupal::messenger()->addMessage('SMS başarıyla gönderildi: ' . $recipient_number);
+    return true;
+  }
+  catch (\Exception $e) {
+    \Drupal::messenger()->addError('SMS gönderimi başarısız: ' . $e->getMessage());
+    return false;
+  }
+}
+
+function mobilpark_sms_gateway_entity_insert(\Drupal\Core\Entity\EntityInterface $entity) {
+  if ($entity instanceof \Drupal\node\NodeInterface) {
+    $node_type = $entity->getType();
+    $user = $entity->getOwner();
+    $phone_number = $user->phone_number->value ?? NULL;
+
+    $message_templates = [
+      'muteahhit_basvuru' => 'Yeni bir müteahhit başvurusu oluşturuldu: %title%',
+      'basvuru' => 'Yeni bir başvuru oluşturuldu: %title%',
+    ];
+
+    if (isset($message_templates[$node_type])) {
+      $message_text = str_replace(
+        '%title%',
+        $entity->getTitle(),
+        $message_templates[$node_type]
+      );
+      
+      mobilpark_sms_gateway_send_sms($phone_number, $message_text);
+    }
+  }
+}
+
+/**
+ * Implements hook_sms_phone_number_verification_process_alter().
+ */
+function mobilpark_sms_gateway_sms_phone_number_verification_process_alter(&$verification_data) {
+  // Yeni kayıtlarda durumu doğrulanmamış olarak işaretle
+  $verification_data['status'] = 0;
+}
+
+/**
+ * Implements hook_user_insert().
+ */
+function mobilpark_sms_gateway_user_insert(\Drupal\User\UserInterface $user) {
+  $phone_number = $user->phone_number->value;
+  
+  if (empty($phone_number)) {
+    \Drupal::logger('mobilpark_sms_gateway')->error('Telefon numarası boş.');
+    return;
+  }
+  
+  // Yeni kullanıcı için doğrulama kodu oluştur ve gönder
+  $code = mt_rand(100000, 999999);
+  $connection = \Drupal::database();
+  
+  try {
+    // Telefon doğrulama tablosunda kayıt var mı kontrol et
+    $verification_exists = $connection->select('sms_phone_number_verification', 's')
+      ->fields('s', ['id'])
+      ->condition('phone', $phone_number, '=')
+      ->execute()
+      ->fetchField();
+    
+    if ($verification_exists) {
+      // Kayıt varsa güncelle
+      $connection->update('sms_phone_number_verification')
+        ->fields([
+          'code' => $code,
+          'status' => 0, // Doğrulanmamış olarak işaretle
+          'created' => \Drupal::time()->getRequestTime(),
+        ])
+        ->condition('phone', $phone_number, '=')
+        ->execute();
+    } else {
+      // Kayıt yoksa ekle
+      $connection->insert('sms_phone_number_verification')
+        ->fields([
+          'phone' => $phone_number,
+          'code' => $code,
+          'status' => 0, // Doğrulanmamış olarak işaretle
+          'created' => \Drupal::time()->getRequestTime(),
+        ])
+        ->execute();
+    }
+    
+    // SMS mesajı oluştur ve gönder - TranslatableMarkup'ı string'e dönüştür
+    $message = t('Doğrulama kodunuz: @code', ['@code' => $code])->render();
+    mobilpark_sms_gateway_send_sms($phone_number, $message);
+    
+    \Drupal::logger('mobilpark_sms_gateway')->notice('Yeni kullanıcıya doğrulama kodu gönderildi: @phone', ['@phone' => $phone_number]);
+    
+    // Kullanıcı oturumuna özel bir bayrak ekle
+    $_SESSION['phone_verification_required'] = TRUE;
+    
+  } catch (\Exception $e) {
+    \Drupal::logger('mobilpark_sms_gateway')->error('Doğrulama kodu gönderilirken hata: @error', ['@error' => $e->getMessage()]);
+  }
+}
+
+/**
+ * Implements hook_user_login().
+ */
+function mobilpark_sms_gateway_user_login($account) {
+  $user = \Drupal\user\Entity\User::load($account->id());
+  $phone_number = $user->phone_number->value ?? NULL;
+  
+  if (empty($phone_number)) {
+    return;
+  }
+  
+  // Telefon numarası doğrulanmış mı kontrol et
+  $connection = \Drupal::database();
+  $query = $connection->select('sms_phone_number_verification', 's')
+    ->fields('s', ['status'])
+    ->condition('phone', $phone_number, '=')
+    ->orderBy('created', 'DESC')
+    ->range(0, 1)
+    ->execute()
+    ->fetchAssoc();
+  
+  // Doğrulama kaydı yoksa veya doğrulanmamışsa, oturuma bayrak ekle
+  if (!$query || $query['status'] == 0) {
+    $_SESSION['phone_verification_required'] = TRUE;
+  }
+}
+
+/**
+ * Implements hook_entity_presave().
+ */
+function mobilpark_sms_gateway_entity_presave(\Drupal\Core\Entity\EntityInterface $entity) {
+  if ($entity instanceof \Drupal\user\UserInterface) {
+    $original = $entity->original;
+    
+    // Telefon numarası değiştiyse ve orijinal bir obje varsa
+    if ($original && isset($entity->phone_number) && isset($original->phone_number) &&
+        $original->phone_number->value != $entity->phone_number->value && 
+        !empty($entity->phone_number->value)) {
+      
+      // Admin tarafından güncelleme yapılıyorsa
+      if (\Drupal::currentUser()->hasPermission('administer users')) {
+        // Admin güncellemesi olduğunu belirten bir bayrak ekleyelim
+        $entity->admin_update = TRUE;
+        
+        // Telefon numarasını doğrulanmış olarak işaretle
+        _mobilpark_sms_gateway_verify_phone_number($entity->phone_number->value);
+        
+        \Drupal::messenger()->addMessage(t('Telefon numarası güncellendi ve otomatik olarak doğrulandı.'));
+      } 
+      // Kullanıcı kendi numarasını değiştiriyorsa
+      else {
+        // Güncellemeyi işaretle, doğrulama işlemleri entity_update'de yapılacak
+        $entity->user_update = TRUE;
+      }
+    }
+  }
+}
+
+/**
+ * Implements hook_entity_update().
+ */
+function mobilpark_sms_gateway_entity_update(\Drupal\Core\Entity\EntityInterface $entity) {
+  if ($entity instanceof \Drupal\user\UserInterface) {
+    // Kullanıcı kendi numarasını değiştirdiyse
+    if (isset($entity->user_update) && 
+        $entity->original && 
+        isset($entity->phone_number) && 
+        isset($entity->original->phone_number) &&
+        $entity->original->phone_number->value != $entity->phone_number->value && 
+        !empty($entity->phone_number->value)) {
+      
+      // Yeni doğrulama kodu oluştur
+      $code = mt_rand(100000, 999999);
+      $phone_number = $entity->phone_number->value;
+      
+      // Doğrulama kodunu veritabanına kaydet
+      $connection = \Drupal::database();
+      
+      try {
+        // Önce bu numara için kayıt var mı kontrol et
+        $verification_exists = $connection->select('sms_phone_number_verification', 's')
+          ->fields('s', ['id'])
+          ->condition('phone', $phone_number, '=')
+          ->execute()
+          ->fetchField();
+        
+        if ($verification_exists) {
+          $connection->update('sms_phone_number_verification')
+            ->fields([
+              'code' => $code,
+              'status' => 0, // Doğrulanmamış olarak işaretle
+              'created' => \Drupal::time()->getRequestTime(),
+            ])
+            ->condition('phone', $phone_number, '=')
+            ->execute();
+        } else {
+          $connection->insert('sms_phone_number_verification')
+            ->fields([
+              'phone' => $phone_number,
+              'code' => $code,
+              'status' => 0, // Doğrulanmamış olarak işaretle
+              'created' => \Drupal::time()->getRequestTime(),
+            ])
+            ->execute();
+        }
+        
+        // SMS mesajı oluştur ve gönder - TranslatableMarkup'ı string'e dönüştür
+        $message = t('Doğrulama kodunuz: @code', ['@code' => $code])->render();
+        mobilpark_sms_gateway_send_sms($phone_number, $message);
+        
+        \Drupal::messenger()->addMessage(t('Telefon numaranız güncellendi. Doğrulama kodunuz SMS olarak gönderildi.'));
+        
+        // Oturuma doğrulama gerektiğini belirt
+        $_SESSION['phone_verification_required'] = TRUE;
+        
+      } catch (\Exception $e) {
+        \Drupal::logger('mobilpark_sms_gateway')->error('Doğrulama kodu gönderilirken hata: @error', ['@error' => $e->getMessage()]);
+      }
+    }
+  }
+}
+
+/**
+ * Telefon numarasını doğrulanmış olarak işaretler.
+ */
+function _mobilpark_sms_gateway_verify_phone_number($phone_number) {
+  if (empty($phone_number)) {
+    return FALSE;
+  }
+  
+  $connection = \Drupal::database();
+  
+  // Önce doğrulama kaydı var mı kontrol et
+  $verification_exists = $connection->select('sms_phone_number_verification', 's')
+    ->fields('s', ['id'])
+    ->condition('phone', $phone_number, '=')
+    ->execute()
+    ->fetchField();
+  
+  // Eğer varsa güncelle
+  if ($verification_exists) {
+    return $connection->update('sms_phone_number_verification')
+      ->fields(['status' => 1])
+      ->condition('phone', $phone_number, '=')
+      ->execute();
+  }
+  // Yoksa yeni kayıt oluştur
+  else {
+    // Rastgele doğrulama kodu oluştur
+    $code = mt_rand(100000, 999999);
+    
+    return $connection->insert('sms_phone_number_verification')
+      ->fields([
+        'phone' => $phone_number,
+        'code' => $code,
+        'status' => 1, // Doğrulanmış olarak işaretle
+        'created' => \Drupal::time()->getRequestTime(),
+      ])
+      ->execute();
+  }
+}
+
+/**
+ * Implements hook_page_attachments().
+ *
+ * Kullanıcı oturumunda doğrulama bayrağı varsa, doğrulama sayfasına yönlendir.
+ */
+function mobilpark_sms_gateway_page_attachments(array &$attachments) {
+  // Oturumda doğrulama bayrağı varsa
+  if (isset($_SESSION['phone_verification_required']) && $_SESSION['phone_verification_required']) {
+    $user_id = \Drupal::currentUser()->id();
+    
+    // Anonim kullanıcılar için kontrole gerek yok
+    if ($user_id == 0) {
+      return;
+    }
+    
+    $route_name = \Drupal::routeMatch()->getRouteName();
+    
+    // İzin verilen rotalar listesi
+    $allowed_routes = [
+      'mobilpark_sms_gateway.verify_otp_form',
+      'user.logout',
+      'user.logout.confirm',
+    ];
+    
+    // Eğer kullanıcı zaten doğrulama sayfasındaysa veya çıkış yapıyorsa, kontrol etme
+    if (in_array($route_name, $allowed_routes)) {
+      return;
+    }
+    
+    // JavaScript yönlendirmesi ekle
+    $attachments['#attached']['library'][] = 'core/drupal.dialog.ajax';
+    $attachments['#attached']['html_head'][] = [
+      [
+        '#type' => 'html_tag',
+        '#tag' => 'script',
+        '#value' => 'setTimeout(function() { window.location.href = "/tr/verify-otp"; }, 100);',
+      ],
+      'phone_verification_redirect',
+    ];
+  }
+}

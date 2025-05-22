@@ -1,0 +1,8 @@
+name: 'MobilPark SMS Gateway'
+type: module
+description: 'Provides a custom SMS gateway for MobilPark API.'
+package: Custom
+core_version_requirement: ^10 || ^11
+dependencies:
+  - sms:sms
+  - drupal:user

@@ -1,0 +1,7 @@
+sms_verification:
+  version: 1.x
+  js:
+    js/sms_verification.js: {}
+  dependencies:
+    - core/drupal.ajax
+    - core/jquery

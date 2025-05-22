@@ -1,0 +1,68 @@
+<?php
+
+/**
+ * @file
+ * Install, update and uninstall functions for the mobilpark_sms_gateway module.
+ */
+
+/**
+ * Implements hook_schema().
+ */
+function mobilpark_sms_gateway_schema() {
+  $schema = [];
+
+  // SMS doğrulama tablosu
+  if (!db_table_exists('sms_phone_number_verification')) {
+    $schema['sms_phone_number_verification'] = [
+      'description' => 'Stores phone number verification data',
+      'fields' => [
+        'id' => [
+          'type' => 'serial',
+          'not null' => TRUE,
+          'description' => 'Primary Key: Unique verification ID.',
+        ],
+        'phone' => [
+          'type' => 'varchar',
+          'length' => 32,
+          'not null' => TRUE,
+          'description' => 'Phone number being verified',
+        ],
+        'code' => [
+          'type' => 'varchar',
+          'length' => 32,
+          'not null' => TRUE,
+          'description' => 'Verification code',
+        ],
+        'status' => [
+          'type' => 'int',
+          'size' => 'tiny',
+          'not null' => TRUE,
+          'default' => 0,
+          'description' => 'Verification status: 0 = pending, 1 = verified',
+        ],
+        'created' => [
+          'type' => 'int',
+          'not null' => TRUE,
+          'description' => 'Timestamp when the code was created',
+        ],
+      ],
+      'primary key' => ['id'],
+      'indexes' => [
+        'phone' => ['phone'],
+        'status' => ['status'],
+      ],
+    ];
+  }
+
+  return $schema;
+}
+
+/**
+ * Ensure sms_phone_number_verification table exists.
+ */
+function mobilpark_sms_gateway_update_8001() {
+  if (!db_table_exists('sms_phone_number_verification')) {
+    $schema = mobilpark_sms_gateway_schema();
+    db_create_table('sms_phone_number_verification', $schema['sms_phone_number_verification']);
+  }
+}
